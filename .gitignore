@@ -4,6 +4,7 @@ model/
 .vscode/
 *.json
 .DS_Store
+configs/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

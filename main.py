@@ -2,7 +2,7 @@ import numpy as np
 from preprocess import get_features, load_data, feature_scaling
 from awgn import augment_waveforms
 from torchinfo import summary
-from model import parallel_all_you_want, cnn_to_transformer
+from model import two_gru_transformer
 import torch.nn as nn
 import torch
 from tqdm.auto import tqdm
@@ -40,7 +40,7 @@ emotion_attributes = {
     '02': 'strong'
 }
 
-model = cnn_to_transformer(num_emotions=len(emotions_dict)).to(cfg['device'])
+model = two_gru_transformer(num_emotions=len(emotions_dict)).to(cfg['device'])
 
 
 def preprocess_and_save():
@@ -448,7 +448,7 @@ def main():
     print('='*60, '\n')
 
     # print(model)
-    # summary(model, input_size=(cfg['minibatch'], 1,40,282))
+    summary(model, input_size=(cfg['minibatch'], 1,40,282))
 
     optimizer = torch.optim.SGD(
         model.parameters(), lr=0.01, weight_decay=1e-3, momentum=0.8)
