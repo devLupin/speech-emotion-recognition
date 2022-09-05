@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import os
 import yaml
 
+os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
 def load_yaml(load_path):
     """load yaml file"""
@@ -311,7 +312,6 @@ class EarlyStopping:
                 self.early_stop = True
         else:
             self.best_score = score
-            self.counter = 0
             self.flag = True
 
 # create training loop for one complete epoch (entire training set)
@@ -319,7 +319,7 @@ class EarlyStopping:
 
 def train(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
     global device
-    early_stopping = EarlyStopping(patience=30)
+    early_stopping = EarlyStopping(patience=500)
 
     # get training set size to calculate # iterations and minibatch indices
     train_size = X_train.shape[0]

@@ -1,3 +1,14 @@
+"""
+    - 패치 단위 학습
+        - 2D CNN으로부터 추출된 값을 패치 단위로 쪼개고, 이를 트랜스포머에 입력
+            - CNN은 공간 정보만 있기 때문
+        - 정확도 향상 안됨.
+    - cnn_transformer_lstm()에 DenseNet 개념인 concat 적용
+        - 정확도 향상 안됨.
+        - training acc만 빠르게 올라가고, val acc는 예전과 똑같이 올라감.
+"""
+
+
 from turtle import forward
 from unicodedata import bidirectional
 import torch
