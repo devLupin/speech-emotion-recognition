@@ -8,7 +8,6 @@
         - training acc만 빠르게 올라가고, val acc는 예전과 똑같이 올라감.
 """
 
-
 from turtle import forward
 from unicodedata import bidirectional
 import torch
@@ -300,7 +299,7 @@ class cnn_to_transformer(nn.Module):
         return output_logits, output_softmax
 
 
-class lstm_model(nn.Module):
+class cnn_lstm_transformer(nn.Module):
     def __init__(self, num_emotions) -> None:
         super().__init__()
 
@@ -809,6 +808,534 @@ class two_gru_transformer(nn.Module):
         logits = self.fc_linear2(logits)
         output_logits = self.fc_linear3(logits)
     
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
+
+
+class cnn_lstm_transformer_concat(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.lstm = nn.LSTM(input_size=40, hidden_size=128, num_layers=1,
+                            bidirectional=True, batch_first=True)
+        self.dropout_lstm = nn.Dropout(0.4)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.4,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+
+        self.conv2Dblock = nn.Sequential(
+
+            # 1st 2D convolution layer
+            nn.Conv2d(
+                in_channels=1,  # input volume depth == input channel dim == 1
+                out_channels=16,  # expand output feature map volume's depth to 16
+                kernel_size=3,  # typical 3*3 stride 1 kernel
+                stride=1,
+                padding=1
+            ),
+            # batch normalize the output feature map before activation
+            nn.BatchNorm2d(16),
+            nn.ReLU(),  # feature map --> activation map
+            # typical maxpool kernel size
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # randomly zero 30% of 1st layer's output feature map in training
+            nn.Dropout(p=0.3),
+
+            # 2nd 2D convolution layer identical to last except output dim, maxpool kernel
+            nn.Conv2d(
+                in_channels=16,
+                out_channels=32,  # expand output feature map volume's depth to 32
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # increase maxpool kernel for subsequent filters
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+
+            # 3rd 2D convolution layer identical to last except output dim
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=64,  # expand output feature map volume's depth to 64
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+        )
+
+        self.fc_linear1 = nn.Linear(12088, 2048)
+        self.fc_linear2 = nn.Linear(2048, 1024)
+        self.fc_linear3 = nn.Linear(1024, 512)
+        self.fc_linear4 = nn.Linear(512, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+
+    def forward(self, x):
+        identity = x
+        identity = torch.squeeze(identity, 1)
+        identity = torch.flatten(identity, start_dim=1)
+        
+        conv2d_embedding = self.conv2Dblock(x)
+        conv2d_embedding = torch.flatten(conv2d_embedding, start_dim=1)     # 256, 512
+        # conv2d_embedding = torch.cat([identity, conv2d_embedding], dim=1)
+
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)      # (b, t, freq)
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = self.dropout_lstm(lstm_embedding)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        # lstm_embedding = torch.cat([identity, lstm_embedding], dim=1)
+
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        # transformer_embedding = torch.cat([identity, transformer_embedding], dim=1)
+
+        complete_embedding = torch.cat(
+            [identity, conv2d_embedding, lstm_embedding, transformer_embedding], dim=1)
+
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
+        output_softmax = self.softmax_out(output_logits)
+
+        return output_logits, output_softmax
+
+
+class gru_lstm_transformer(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.gru = nn.GRU(input_size=40, hidden_size=128, num_layers=1, bidirectional=True, batch_first=True)
+        self.dropout_gru = nn.Dropout(0.4)
+        
+        self.lstm = nn.LSTM(input_size=40, hidden_size=128, num_layers=1,
+                            bidirectional=True, batch_first=True)
+        self.dropout_lstm = nn.Dropout(0.4)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.4,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+        
+        self.conv2Dblock1 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=1,  # input volume depth == input channel dim == 1
+                out_channels=16,  # expand output feature map volume's depth to 16
+                kernel_size=3,  # typical 3*3 stride 1 kernel
+                stride=1,
+                padding=1
+            ),
+            # batch normalize the output feature map before activation
+            nn.BatchNorm2d(16),
+            nn.ReLU(),  # feature map --> activation map
+            # typical maxpool kernel size
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # randomly zero 30% of 1st layer's output feature map in training
+            nn.Dropout(p=0.3),
+
+            # 2nd 2D convolution layer identical to last except output dim, maxpool kernel
+            nn.Conv2d(
+                in_channels=16,
+                out_channels=32,  # expand output feature map volume's depth to 32
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # increase maxpool kernel for subsequent filters
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+
+            # 3rd 2D convolution layer identical to last except output dim
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=64,  # expand output feature map volume's depth to 64
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+        )
+        
+        self.conv2Dblock2 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=1,  # input volume depth == input channel dim == 1
+                out_channels=16,  # expand output feature map volume's depth to 16
+                kernel_size=3,  # typical 3*3 stride 1 kernel
+                stride=1,
+                padding=1
+            ),
+            # batch normalize the output feature map before activation
+            nn.BatchNorm2d(16),
+            nn.ReLU(),  # feature map --> activation map
+            # typical maxpool kernel size
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # randomly zero 30% of 1st layer's output feature map in training
+            nn.Dropout(p=0.3),
+
+            # 2nd 2D convolution layer identical to last except output dim, maxpool kernel
+            nn.Conv2d(
+                in_channels=16,
+                out_channels=32,  # expand output feature map volume's depth to 32
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # increase maxpool kernel for subsequent filters
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+
+            # 3rd 2D convolution layer identical to last except output dim
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=64,  # expand output feature map volume's depth to 64
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+        )
+        
+        self.conv2Dblock3 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=1,  # input volume depth == input channel dim == 1
+                out_channels=16,  # expand output feature map volume's depth to 16
+                kernel_size=3,  # typical 3*3 stride 1 kernel
+                stride=1,
+                padding=1
+            ),
+            # batch normalize the output feature map before activation
+            nn.BatchNorm2d(16),
+            nn.ReLU(),  # feature map --> activation map
+            # typical maxpool kernel size
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # randomly zero 30% of 1st layer's output feature map in training
+            nn.Dropout(p=0.3),
+
+            # 2nd 2D convolution layer identical to last except output dim, maxpool kernel
+            nn.Conv2d(
+                in_channels=16,
+                out_channels=32,  # expand output feature map volume's depth to 32
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # increase maxpool kernel for subsequent filters
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+
+            # 3rd 2D convolution layer identical to last except output dim
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=64,  # expand output feature map volume's depth to 64
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.3),
+        )
+        
+        self.fc_linear1 = nn.Linear(2088, 1024)
+        self.fc_linear2 = nn.Linear(1024, 512)
+        self.fc_linear3 = nn.Linear(512, 256) 
+        self.fc_linear4 = nn.Linear(256, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+    
+    def forward(self, x):
+        conv2d_embedding1 = self.conv2Dblock1(x)
+        conv2d_embedding1 = torch.flatten(conv2d_embedding1, start_dim=1)
+
+        conv2d_embedding2 = self.conv2Dblock2(x)
+        conv2d_embedding2 = torch.flatten(conv2d_embedding2, start_dim=1)
+
+        conv2d_embedding3 = self.conv2Dblock3(x)
+        conv2d_embedding3 = torch.flatten(conv2d_embedding3, start_dim=1)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)
+        
+        gru_embedding, (h, c) = self.gru(x_reduced)
+        gru_embedding = self.dropout_gru(gru_embedding)
+        gru_embedding = torch.mean(gru_embedding, dim=1)
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = self.dropout_lstm(lstm_embedding)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        
+        complete_embedding = torch.cat([conv2d_embedding1, conv2d_embedding2, conv2d_embedding3, gru_embedding, lstm_embedding, transformer_embedding], dim=1)
+        
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
+    
+
+class gru_lstm_transformer_finetune(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.relu = nn.ReLU()
+
+        self.gru = nn.GRU(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.gru_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+        
+        self.lstm = nn.LSTM(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.lstm_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.1,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+        self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
+        
+        self.conv2Dblock1 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=1,  # input volume depth == input channel dim == 1
+                out_channels=16,  # expand output feature map volume's depth to 16
+                kernel_size=3,  # typical 3*3 stride 1 kernel
+                stride=1,
+                padding=1
+            ),
+            # batch normalize the output feature map before activation
+            nn.BatchNorm2d(16),
+            nn.ReLU(),  # feature map --> activation map
+            # typical maxpool kernel size
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # randomly zero 30% of 1st layer's output feature map in training
+            nn.Dropout(p=0.1),
+
+            # 2nd 2D convolution layer identical to last except output dim, maxpool kernel
+            nn.Conv2d(
+                in_channels=16,
+                out_channels=32,  # expand output feature map volume's depth to 32
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # increase maxpool kernel for subsequent filters
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.1),
+
+            # 3rd 2D convolution layer identical to last except output dim
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=64,  # expand output feature map volume's depth to 64
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.1),
+        )
+        
+        self.conv2Dblock2 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=1,  # input volume depth == input channel dim == 1
+                out_channels=16,  # expand output feature map volume's depth to 16
+                kernel_size=3,  # typical 3*3 stride 1 kernel
+                stride=1,
+                padding=1
+            ),
+            # batch normalize the output feature map before activation
+            nn.BatchNorm2d(16),
+            nn.ReLU(),  # feature map --> activation map
+            # typical maxpool kernel size
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # randomly zero 30% of 1st layer's output feature map in training
+            nn.Dropout(p=0.1),
+
+            # 2nd 2D convolution layer identical to last except output dim, maxpool kernel
+            nn.Conv2d(
+                in_channels=16,
+                out_channels=32,  # expand output feature map volume's depth to 32
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # increase maxpool kernel for subsequent filters
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.1),
+
+            # 3rd 2D convolution layer identical to last except output dim
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=64,  # expand output feature map volume's depth to 64
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.1),
+        )
+        
+        self.conv2Dblock3 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=1,  # input volume depth == input channel dim == 1
+                out_channels=16,  # expand output feature map volume's depth to 16
+                kernel_size=3,  # typical 3*3 stride 1 kernel
+                stride=1,
+                padding=1
+            ),
+            # batch normalize the output feature map before activation
+            nn.BatchNorm2d(16),
+            nn.ReLU(),  # feature map --> activation map
+            # typical maxpool kernel size
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # randomly zero 30% of 1st layer's output feature map in training
+            nn.Dropout(p=0.1),
+
+            # 2nd 2D convolution layer identical to last except output dim, maxpool kernel
+            nn.Conv2d(
+                in_channels=16,
+                out_channels=32,  # expand output feature map volume's depth to 32
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            # increase maxpool kernel for subsequent filters
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.1),
+
+            # 3rd 2D convolution layer identical to last except output dim
+            nn.Conv2d(
+                in_channels=32,
+                out_channels=64,  # expand output feature map volume's depth to 64
+                kernel_size=3,
+                stride=1,
+                padding=1
+            ),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=4, stride=4),
+            nn.Dropout(p=0.1),
+        )
+                
+        self.fc_linear1 = nn.Linear(3624, 1024)
+        self.fc_linear2 = nn.Linear(1024, 512)
+        self.fc_linear3 = nn.Linear(512, 256) 
+        self.fc_linear4 = nn.Linear(256, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+    
+    def forward(self, x):
+        conv2d_embedding1 = self.conv2Dblock1(x)
+        conv2d_embedding1 = torch.flatten(conv2d_embedding1, start_dim=1)
+
+        conv2d_embedding2 = self.conv2Dblock2(x)
+        conv2d_embedding2 = torch.flatten(conv2d_embedding2, start_dim=1)
+
+        conv2d_embedding3 = self.conv2Dblock3(x)
+        conv2d_embedding3 = torch.flatten(conv2d_embedding3, start_dim=1)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)
+        
+        
+        gru_embedding, h = self.gru(x_reduced)
+        gru_embedding = torch.mean(gru_embedding, dim=1)
+        gru_embedding = self.gru_ln(gru_embedding)
+        gru_embedding = self.relu(gru_embedding)
+        
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        lstm_embedding = self.lstm_ln(lstm_embedding)
+        lstm_embedding = self.relu(lstm_embedding)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        transformer_embedding = self.transformer_ln(transformer_embedding)
+        transformer_embedding = self.relu(transformer_embedding)
+        
+        complete_embedding = torch.cat([conv2d_embedding1, conv2d_embedding2, conv2d_embedding3, gru_embedding, lstm_embedding, transformer_embedding], dim=1)
+        
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
         output_softmax = self.softmax_out(output_logits)
         
         return output_logits, output_softmax

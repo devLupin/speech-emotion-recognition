@@ -2,12 +2,12 @@ import numpy as np
 from preprocess import get_features, load_data, feature_scaling
 from awgn import augment_waveforms
 from torchinfo import summary
-from model import two_gru_transformer
 import torch.nn as nn
 import torch
 from tqdm.auto import tqdm
 import os
 import yaml
+from model import gru_lstm_transformer_finetune
 
 os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
@@ -41,7 +41,7 @@ emotion_attributes = {
     '02': 'strong'
 }
 
-model = two_gru_transformer(num_emotions=len(emotions_dict)).to(cfg['device'])
+model = gru_lstm_transformer_finetune(num_emotions=len(emotions_dict)).to(cfg['device'])
 
 
 def preprocess_and_save():
@@ -319,7 +319,7 @@ class EarlyStopping:
 
 def train(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
     global device
-    early_stopping = EarlyStopping(patience=500)
+    early_stopping = EarlyStopping(patience=100)
 
     # get training set size to calculate # iterations and minibatch indices
     train_size = X_train.shape[0]
@@ -404,7 +404,8 @@ def train(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
         early_stopping(valid_loss)
         if early_stopping.early_stop:
             print(f"\n\n[*] Early Stop - {epoch} epochs")
-            print(f'[*] Best validation loss - {valid_loss}')
+            print(f'[*] Best training loss - {min(train_losses)}')
+            print(f'[*] Best validation loss - {min(valid_losses)}')
             break
 
         if early_stopping.flag:
