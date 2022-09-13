@@ -1,7 +1,31 @@
 import numpy as np
+import librosa
 from preprocess import feature_mfcc
 
-def awgn_augmentation(waveform, multiples=2, bits=16, snr_min=15, snr_max=30): 
+
+# https://melon1024.github.io/data_aug/
+# Additive White Noise
+def wn_waveforms(waveform):
+    wave_len = len(waveform)
+    white_noise = waveform + 0.005*(np.random.randn(wave_len))
+    return white_noise
+
+# shift
+# don't feel any difference
+def shift_waveforms(waveform, shift):
+    return np.roll(waveform, shift)
+
+# stretching
+# faster according to rate
+# inappropriate for emotion recognition
+def stretch_waveforms(waveform, rate):
+    waveform = np.asarray(waveform)
+    waveform = librosa.effects.time_stretch(waveform, rate)
+    return waveform
+
+# https://github.com/IliaZenkov/transformer-cnn-emotion-recognitionb
+# Clean noise compared to white noise
+def awgn_waveforms(waveform, multiples=2, bits=16, snr_min=15, snr_max=30): 
     
     # get length of waveform (should be 3*48k = 144k)
     wave_len = len(waveform)
@@ -47,7 +71,7 @@ def augment_waveforms(waveforms, features, emotions, multiples, sample_rate):
     for waveform in waveforms:
 
         # Generate 2 augmented multiples of the dataset, i.e. 1440 native + 1440*2 noisy = 4320 samples total
-        augmented_waveforms = awgn_augmentation(waveform, multiples=multiples)
+        augmented_waveforms = awgn_waveforms(waveform, multiples=multiples)
 
         # compute spectrogram for each of 2 augmented waveforms
         for augmented_waveform in augmented_waveforms:
