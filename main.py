@@ -1,12 +1,12 @@
 import numpy as np
 from preprocess import get_features, load_data, feature_scaling
-from data_augmentation import augment_waveforms
+from data_augmentation import augment_awgn_waveforms
 from torchinfo import summary
 import torch.nn as nn
 import torch
 import os
 import yaml
-from model import gru_lstm_transformer_finetune
+from model import gru_lstm_transformer_ln
 
 os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
@@ -40,7 +40,7 @@ emotion_attributes = {
     '02': 'strong'
 }
 
-model = gru_lstm_transformer_finetune(num_emotions=len(emotions_dict)).to(cfg['device'])
+model = gru_lstm_transformer_ln(num_emotions=len(emotions_dict)).to(cfg['device'])
 
 
 def preprocess_and_save():
@@ -158,15 +158,15 @@ def preprocess_and_save():
     multiples = 2
 
     print('Train waveforms:')  # augment waveforms of training set
-    features_train, y_train = augment_waveforms(
+    features_train, y_train = augment_awgn_waveforms(
         X_train, features_train, y_train, multiples, cfg['sample_rate'])
 
     print('\n\nValidation waveforms:')  # augment waveforms of validation set
-    features_valid, y_valid = augment_waveforms(
+    features_valid, y_valid = augment_awgn_waveforms(
         X_valid, features_valid, y_valid, multiples, cfg['sample_rate'])
 
     print('\n\nTest waveforms:')  # augment waveforms of test set
-    features_test, y_test = augment_waveforms(
+    features_test, y_test = augment_awgn_waveforms(
         X_test, features_test, y_test, multiples, cfg['sample_rate'])
 
     # Check new shape of extracted features and data:
@@ -175,6 +175,9 @@ def preprocess_and_save():
     print(f'{len(y_train)} training sample labels, {len(y_valid)} validation sample labels, {len(y_test)} test sample labels')
     print(
         f'Features (MFCC matrix) shape: {len(features_train[0])} mel frequency coefficients x {len(features_train[0][1])} time steps')
+
+    #shape: (3441, 40, 282)
+    print(f'shape: {np.array(features_train).shape}')
 
     # need to make dummy input channel for CNN input feature tensor
     X_train = np.expand_dims(features_train, 1)
@@ -316,16 +319,12 @@ class EarlyStopping:
 # create training loop for one complete epoch (entire training set)
 
 
-def train(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
+def train_earlystop(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
     global device
     early_stopping = EarlyStopping(patience=100)
 
     # get training set size to calculate # iterations and minibatch indices
     train_size = X_train.shape[0]
-
-    # encountered bugs in google colab only, unless I explicitly defined optimizer in this cell...
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=0.01, weight_decay=1e-3, momentum=0.8)
 
     # instantiate the checkpoint save function
     save_checkpoint = make_save_checkpoint()
@@ -415,12 +414,103 @@ def train(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
         print('\r'+f' Epoch {epoch} --- loss:{epoch_loss:.3f}, Epoch accuracy:{epoch_acc:.2f}%, Validation loss:{valid_loss:.3f}, Validation accuracy:{valid_acc:.2f}%', end='')
 
 
+def train(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
+    global device
+
+    # get training set size to calculate # iterations and minibatch indices
+    train_size = X_train.shape[0]
+
+    # instantiate the checkpoint save function
+    save_checkpoint = make_save_checkpoint()
+
+    # instantiate the training step function
+    train_step = make_train_step(model, criterion, optimizer=optimizer)
+
+    # instantiate the validation loop function
+    validate = make_validate_fnc(model, criterion)
+
+    # instantiate lists to hold scalar performance metrics to plot later
+    train_losses = []
+    valid_losses = []
+    
+    cur_valid_loss = 987654321
+
+    for epoch in range(num_epochs):
+
+        # set model to train phase
+        model.train()
+
+        # shuffle entire training set in each epoch to randomize minibatch order
+        train_indices = np.random.permutation(train_size)
+
+        # shuffle the training set for each epoch:
+        X_train = X_train[train_indices, :, :, :]
+        Y_train = Y_train[train_indices]
+
+        # instantiate scalar values to keep track of progress after each epoch so we can stop training when appropriate
+        epoch_acc = 0
+        epoch_loss = 0
+        num_iterations = int(train_size / cfg['minibatch'])
+
+        # create a loop for each minibatch of 32 samples:
+        for i in range(num_iterations):
+
+            # we have to track and update minibatch position for the current minibatch
+            # if we take a random batch position from a set, we almost certainly will skip some of the data in that set
+            # track minibatch position based on iteration number:
+            batch_start = i * cfg['minibatch']
+            # ensure we don't go out of the bounds of our training set:
+            batch_end = min(batch_start + cfg['minibatch'], train_size)
+            # ensure we don't have an index error
+            actual_batch_size = batch_end-batch_start
+
+            # get training minibatch with all channnels and 2D feature dims
+            X = X_train[batch_start:batch_end, :, :, :]
+            # get training minibatch labels
+            Y = Y_train[batch_start:batch_end]
+
+            # instantiate training tensors
+            X_tensor = torch.tensor(X, device=cfg['device']).float()
+            Y_tensor = torch.tensor(Y, dtype=torch.long, device=cfg['device'])
+
+            # Pass input tensors thru 1 training step (fwd+backwards pass)
+            loss, acc = train_step(X_tensor, Y_tensor)
+
+            # aggregate batch accuracy to measure progress of entire epoch
+            epoch_acc += acc * actual_batch_size / train_size
+            epoch_loss += loss * actual_batch_size / train_size
+
+            # keep track of the iteration to see if the model's too slow
+            print('\r'+f'Epoch {epoch}: iteration {i}/{num_iterations}', end='')
+
+        # create tensors from validation set
+        X_valid_tensor = torch.tensor(X_valid, device=cfg['device']).float()
+        Y_valid_tensor = torch.tensor(
+            Y_valid, dtype=torch.long, device=cfg['device'])
+
+        # calculate validation metrics to keep track of progress; don't need predictions now
+        valid_loss, valid_acc, _ = validate(X_valid_tensor, Y_valid_tensor)
+
+        # accumulate scalar performance metrics at each epoch to track and plot later
+        train_losses.append(epoch_loss)
+        valid_losses.append(valid_loss)
+
+        if cur_valid_loss > valid_loss:
+            save_checkpoint(optimizer, model, epoch, pkl_name)
+            cur_valid_loss = valid_loss
+
+        # keep track of each epoch's progress
+        print('\r'+f' Epoch {epoch} --- loss:{epoch_loss:.3f}, Epoch accuracy:{epoch_acc:.2f}%, Validation loss:{valid_loss:.3f}, Validation accuracy:{valid_acc:.2f}%', end='')
+    
+    print(f"\n\n[*] done - {num_epochs} epochs")
+    print(f'[*] Best training loss - {min(train_losses)}')
+    print(f'[*] Best validation loss - {min(valid_losses)}')
+
+
 def main():
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # preprocess_and_save()
 
     # open file in read mode and read data
     with open(cfg['npy_name'], 'rb') as f:
@@ -450,11 +540,10 @@ def main():
     # print(model)
     summary(model, input_size=(cfg['minibatch'], 1,40,282))
 
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=0.01, weight_decay=1e-3, momentum=0.8)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-3, momentum=0.8)
 
-    train(optimizer, model, cfg['num_epochs'],
-          X_train, y_train, X_valid, y_valid)
+    # train_earlystop(optimizer, model, cfg['num_epochs'], X_train, y_train, X_valid, y_valid)
+    train(optimizer, model, cfg['num_epochs'], X_train, y_train, X_valid, y_valid)
 
     load_checkpoint(optimizer, model, pkl_name)
 
@@ -467,8 +556,7 @@ def main():
     y_test_tensor = torch.tensor(y_test, dtype=torch.long, device=device)
 
     # Get the model's performance metrics using the validation function we defined
-    test_loss, test_acc, predicted_emotions = validate(
-        X_test_tensor, y_test_tensor)
+    test_loss, test_acc, predicted_emotions = validate(X_test_tensor, y_test_tensor)
 
     print(f'[*] Test accuracy is {test_acc:.2f}%')
 
