@@ -8,13 +8,11 @@
         - training acc만 빠르게 올라가고, val acc는 예전과 똑같이 올라감.
 """
 
-from sqlite3 import complete_statement
 import torch
 import torch.nn as nn
 from torchvision import models
 from torchvision import transforms
 from einops import rearrange
-import numpy as np
 import yaml
 
 def load_yaml(load_path):
@@ -1365,12 +1363,19 @@ class gru_lstm_transformer_transfer_resnet(nn.Module):
         self.resnet_num_patches = 7
         
         self.model_ft1 = models.resnet18(pretrained=True)
+        self.model_ft1 = torch.nn.Sequential(*(list(self.model_ft1.children())[:-1]))
         self.model_ft2 = models.resnet18(pretrained=True)
+        self.model_ft2 = torch.nn.Sequential(*(list(self.model_ft2.children())[:-1]))
         self.model_ft3 = models.resnet18(pretrained=True)
+        self.model_ft3 = torch.nn.Sequential(*(list(self.model_ft3.children())[:-1]))
         self.model_ft4 = models.resnet18(pretrained=True)
+        self.model_ft4 = torch.nn.Sequential(*(list(self.model_ft4.children())[:-1]))
         self.model_ft5 = models.resnet18(pretrained=True)
+        self.model_ft5 = torch.nn.Sequential(*(list(self.model_ft5.children())[:-1]))
         self.model_ft6 = models.resnet18(pretrained=True)
+        self.model_ft6 = torch.nn.Sequential(*(list(self.model_ft6.children())[:-1]))
         self.model_ft7 = models.resnet18(pretrained=True)
+        self.model_ft7 = torch.nn.Sequential(*(list(self.model_ft7.children())[:-1]))
         
         self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
 
@@ -1395,7 +1400,7 @@ class gru_lstm_transformer_transfer_resnet(nn.Module):
             transformer_layer, num_layers=4)
         self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
         
-        self.fc_linear1 = nn.Linear(8064, 1024)
+        self.fc_linear1 = nn.Linear(4648, 1024)
         self.fc_linear2 = nn.Linear(1024, 512)
         self.fc_linear3 = nn.Linear(512, 256) 
         self.fc_linear4 = nn.Linear(256, num_emotions)
@@ -1411,12 +1416,19 @@ class gru_lstm_transformer_transfer_resnet(nn.Module):
         resize_ft_input = torch.cat([resize_ft_input, resize_ft_input, resize_ft_input], dim=2)
         
         ft_output1 = self.model_ft1(resize_ft_input[:,0,:,:,:])
+        ft_output1 = torch.flatten(ft_output1, start_dim=1)
         ft_output2 = self.model_ft2(resize_ft_input[:,1,:,:,:])
+        ft_output2 = torch.flatten(ft_output2, start_dim=1)
         ft_output3 = self.model_ft3(resize_ft_input[:,2,:,:,:])
+        ft_output3 = torch.flatten(ft_output3, start_dim=1)
         ft_output4 = self.model_ft4(resize_ft_input[:,3,:,:,:])
+        ft_output4 = torch.flatten(ft_output4, start_dim=1)
         ft_output5 = self.model_ft5(resize_ft_input[:,4,:,:,:])
+        ft_output5 = torch.flatten(ft_output5, start_dim=1)
         ft_output6 = self.model_ft6(resize_ft_input[:,5,:,:,:])
+        ft_output6 = torch.flatten(ft_output6, start_dim=1)
         ft_output7 = self.model_ft7(resize_ft_input[:,6,:,:,:])
+        ft_output7 = torch.flatten(ft_output7, start_dim=1)
         
         ft_embedding = torch.cat([ft_output1, ft_output2, ft_output3, ft_output4, ft_output5, ft_output6, ft_output7], dim=1)
         
