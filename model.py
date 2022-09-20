@@ -1722,7 +1722,7 @@ class gru_lstm_transformer_transfer_cnn14(nn.Module):
         self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
     
         self.cnn14 = Cnn14()
-        checkpoint = torch.load('Cnn14_16k_mAP=0.438.pth', map_location='cuda')     # 모델을 동적으로 GPU에 할당
+        checkpoint = torch.load('pth/Cnn14_16k.pth', map_location='cuda')     # 모델을 동적으로 GPU에 할당
         self.cnn14.load_state_dict(checkpoint['model'], strict=False)         # 더 많은 키를 갖고 있는 경우 strict=False
         
         
@@ -1771,4 +1771,609 @@ class gru_lstm_transformer_transfer_cnn14(nn.Module):
         
         return output_logits, output_softmax
     
+
+class MobileNetV1(nn.Module):
+    def __init__(self):
+        
+        super(MobileNetV1, self).__init__()
+
+        def conv_bn(inp, oup, stride):
+            _layers = [
+                nn.Conv2d(inp, oup, 3, 1, 1, bias=False), 
+                nn.AvgPool2d(stride), 
+                nn.BatchNorm2d(oup), 
+                nn.ReLU(inplace=True)
+                ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[2])
+            return _layers
+
+        def conv_dw(inp, oup, stride):
+            _layers = [
+                nn.Conv2d(inp, inp, 3, 1, 1, groups=inp, bias=False), 
+                nn.AvgPool2d(stride), 
+                nn.BatchNorm2d(inp), 
+                nn.ReLU(inplace=True), 
+                nn.Conv2d(inp, oup, 1, 1, 0, bias=False), 
+                nn.BatchNorm2d(oup), 
+                nn.ReLU(inplace=True)
+                ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[2])
+            init_layer(_layers[4])
+            init_bn(_layers[5])
+            return _layers
+
+        self.features = nn.Sequential(
+            conv_bn(  1,  32, 2), 
+            conv_dw( 32,  64, 1),
+            conv_dw( 64, 128, 2),
+            conv_dw(128, 128, 1),
+            conv_dw(128, 256, 2),
+            conv_dw(256, 256, 1),
+            conv_dw(256, 512, 2),
+            conv_dw(512, 512, 1),
+            conv_dw(512, 512, 1),
+            conv_dw(512, 512, 1),
+            conv_dw(512, 512, 1),
+            conv_dw(512, 512, 1),
+            conv_dw(512, 1024, 2),
+            conv_dw(1024, 1024, 1))
+
+        self.fc1 = nn.Linear(1024, 1024, bias=True)
+
+        init_layer(self.fc1)
+ 
+    def forward(self, x):
+        x = self.features(x)
+        x = torch.mean(x, dim=3)
+        
+        (x1, _) = torch.max(x, dim=2)
+        x2 = torch.mean(x, dim=2)
+        x = x1 + x2
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = F.relu_(self.fc1(x))
+        embedding = F.dropout(x, p=0.5, training=self.training)
+
+        return embedding
+
+class gru_lstm_transformer_transfer_MobileNetV1(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.relu = nn.ReLU()
+
+        self.gru = nn.GRU(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.gru_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+        
+        self.lstm = nn.LSTM(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.lstm_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.1,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+        self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
+    
+        self.mobilenetv1 = MobileNetV1()
+        checkpoint = torch.load('pth/MobileNetV1.pth', map_location='cuda')     # 모델을 동적으로 GPU에 할당
+        self.mobilenetv1.load_state_dict(checkpoint['model'], strict=False)         # 더 많은 키를 갖고 있는 경우 strict=False
+        
+        
+        self.fc_linear1 = nn.Linear(3112, 1024)
+        self.fc_linear2 = nn.Linear(1024, 512)
+        self.fc_linear3 = nn.Linear(512, 256) 
+        self.fc_linear4 = nn.Linear(256, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+    
+    def forward(self, x):
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)
+        
+        
+        gru_embedding, h = self.gru(x_reduced)
+        gru_embedding = torch.mean(gru_embedding, dim=1)
+        gru_embedding = self.gru_ln(gru_embedding)
+        gru_embedding = self.relu(gru_embedding)
+        
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        lstm_embedding = self.lstm_ln(lstm_embedding)
+        lstm_embedding = self.relu(lstm_embedding)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        transformer_embedding = self.transformer_ln(transformer_embedding)
+        transformer_embedding = self.relu(transformer_embedding)
+        
+        mobilenetV1_embedding = self.mobilenetv1(x)
+        
+        complete_embedding = torch.cat([mobilenetV1_embedding, gru_embedding, lstm_embedding, transformer_embedding], dim=1)
+        
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
+    
+
+class InvertedResidual(nn.Module):
+    def __init__(self, inp, oup, stride, expand_ratio):
+        super(InvertedResidual, self).__init__()
+        self.stride = stride
+        assert stride in [1, 2]
+
+        hidden_dim = round(inp * expand_ratio)
+        self.use_res_connect = self.stride == 1 and inp == oup
+
+        if expand_ratio == 1:
+            _layers = [
+                nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1, groups=hidden_dim, bias=False), 
+                nn.AvgPool2d(stride), 
+                nn.BatchNorm2d(hidden_dim), 
+                nn.ReLU6(inplace=True), 
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False), 
+                nn.BatchNorm2d(oup)
+                ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[2])
+            init_layer(_layers[4])
+            init_bn(_layers[5])
+            self.conv = _layers
+        else:
+            _layers = [
+                nn.Conv2d(inp, hidden_dim, 1, 1, 0, bias=False), 
+                nn.BatchNorm2d(hidden_dim), 
+                nn.ReLU6(inplace=True), 
+                nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1, groups=hidden_dim, bias=False), 
+                nn.AvgPool2d(stride), 
+                nn.BatchNorm2d(hidden_dim), 
+                nn.ReLU6(inplace=True), 
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False), 
+                nn.BatchNorm2d(oup)
+                ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[1])
+            init_layer(_layers[3])
+            init_bn(_layers[5])
+            init_layer(_layers[7])
+            init_bn(_layers[8])
+            self.conv = _layers
+
+    def forward(self, x):
+        if self.use_res_connect:
+            return x + self.conv(x)
+        else:
+            return self.conv(x)
+        
+class MobileNetV2(nn.Module):
+    def __init__(self):
+        
+        super(MobileNetV2, self).__init__()
+ 
+        width_mult=1.
+        block = InvertedResidual
+        input_channel = 32
+        last_channel = 1280
+        interverted_residual_setting = [
+            # t, c, n, s
+            [1, 16, 1, 1],
+            [6, 24, 2, 2],
+            [6, 32, 3, 2],
+            [6, 64, 4, 2],
+            [6, 96, 3, 2],
+            [6, 160, 3, 1],
+            [6, 320, 1, 1],
+        ]
+
+        def conv_bn(inp, oup, stride):
+            _layers = [
+                nn.Conv2d(inp, oup, 3, 1, 1, bias=False), 
+                nn.AvgPool2d(stride), 
+                nn.BatchNorm2d(oup), 
+                nn.ReLU6(inplace=True)
+                ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[2])
+            return _layers
+
+
+        def conv_1x1_bn(inp, oup):
+            _layers = nn.Sequential(
+                nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+                nn.ReLU6(inplace=True)
+            )
+            init_layer(_layers[0])
+            init_bn(_layers[1])
+            return _layers
+
+        # building first layer
+        input_channel = int(input_channel * width_mult)
+        self.last_channel = int(last_channel * width_mult) if width_mult > 1.0 else last_channel
+        self.features = [conv_bn(1, input_channel, 2)]
+        # building inverted residual blocks
+        for t, c, n, s in interverted_residual_setting:
+            output_channel = int(c * width_mult)
+            for i in range(n):
+                if i == 0:
+                    self.features.append(block(input_channel, output_channel, s, expand_ratio=t))
+                else:
+                    self.features.append(block(input_channel, output_channel, 1, expand_ratio=t))
+                input_channel = output_channel
+        # building last several layers
+        self.features.append(conv_1x1_bn(input_channel, self.last_channel))
+        # make it nn.Sequential
+        self.features = nn.Sequential(*self.features)
+
+        self.fc1 = nn.Linear(1280, 1024, bias=True)
+        
+        init_layer(self.fc1)
+ 
+    def forward(self, x):
+
+        x = self.features(x)
+        
+        x = torch.mean(x, dim=3)
+        
+        (x1, _) = torch.max(x, dim=2)
+        x2 = torch.mean(x, dim=2)
+        x = x1 + x2
+        # x = F.dropout(x, p=0.5, training=self.training)
+        x = F.relu_(self.fc1(x))
+        embedding = F.dropout(x, p=0.5, training=self.training)
+        
+        return embedding
+
+class gru_lstm_transformer_transfer_MobileNetV2(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.relu = nn.ReLU()
+
+        self.gru = nn.GRU(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.gru_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+        
+        self.lstm = nn.LSTM(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.lstm_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.1,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+        self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
+    
+        self.mobilenetv2 = MobileNetV2()
+        checkpoint = torch.load('pth/MobileNetV2.pth', map_location='cuda')     # 모델을 동적으로 GPU에 할당
+        self.mobilenetv2.load_state_dict(checkpoint['model'], strict=False)         # 더 많은 키를 갖고 있는 경우 strict=False
+        
+        
+        self.fc_linear1 = nn.Linear(3112, 1024)
+        self.fc_linear2 = nn.Linear(1024, 512)
+        self.fc_linear3 = nn.Linear(512, 256) 
+        self.fc_linear4 = nn.Linear(256, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+    
+    def forward(self, x):
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)
+        
+        
+        gru_embedding, h = self.gru(x_reduced)
+        gru_embedding = torch.mean(gru_embedding, dim=1)
+        gru_embedding = self.gru_ln(gru_embedding)
+        gru_embedding = self.relu(gru_embedding)
+        
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        lstm_embedding = self.lstm_ln(lstm_embedding)
+        lstm_embedding = self.relu(lstm_embedding)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        transformer_embedding = self.transformer_ln(transformer_embedding)
+        transformer_embedding = self.relu(transformer_embedding)
+        
+        mobilenetV2_embedding = self.mobilenetv2(x)
+        
+        complete_embedding = torch.cat([mobilenetV2_embedding, gru_embedding, lstm_embedding, transformer_embedding], dim=1)
+        
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
+    
+
+def _resnet_conv3x3(in_planes, out_planes):
+    #3x3 convolution with padding
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=1,
+                     padding=1, groups=1, bias=False, dilation=1)
+
+def _resnet_conv1x1(in_planes, out_planes):
+    #1x1 convolution
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=1, bias=False)
+
+class _ResnetBasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
+                 base_width=64, dilation=1, norm_layer=None):
+        super(_ResnetBasicBlock, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64:
+            raise ValueError('_ResnetBasicBlock only supports groups=1 and base_width=64')
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in _ResnetBasicBlock")
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+
+        self.stride = stride
+
+        self.conv1 = _resnet_conv3x3(inplanes, planes)
+        self.bn1 = norm_layer(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = _resnet_conv3x3(planes, planes)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+        self.init_weights()
+
+    def init_weights(self):
+        init_layer(self.conv1)
+        init_bn(self.bn1)
+        init_layer(self.conv2)
+        init_bn(self.bn2)
+        nn.init.constant_(self.bn2.weight, 0)
+
+    def forward(self, x):
+        identity = x
+
+        if self.stride == 2:
+            out = F.avg_pool2d(x, kernel_size=(2, 2))
+        else:
+            out = x
+
+        out = self.conv1(out)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = F.dropout(out, p=0.1, training=self.training)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        if self.downsample is not None:
+            identity = self.downsample(identity)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+class _ResNet(nn.Module):
+    def __init__(self, block, layers, zero_init_residual=False,
+                 groups=1, width_per_group=64, replace_stride_with_dilation=None,
+                 norm_layer=None):
+        super(_ResNet, self).__init__()
+
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        self._norm_layer = norm_layer
+
+        self.inplanes = 64
+        self.dilation = 1
+        if replace_stride_with_dilation is None:
+            # each element in the tuple indicates if we should replace
+            # the 2x2 stride with a dilated convolution instead
+            replace_stride_with_dilation = [False, False, False]
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError("replace_stride_with_dilation should be None "
+                             "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
+        self.groups = groups
+        self.base_width = width_per_group
+
+        self.layer1 = self._make_layer(block, 64, layers[0], stride=1)
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
+                                       dilate=replace_stride_with_dilation[0])
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
+                                       dilate=replace_stride_with_dilation[1])
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
+                                       dilate=replace_stride_with_dilation[2])
+
+    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
+        norm_layer = self._norm_layer
+        downsample = None
+        previous_dilation = self.dilation
+        if dilate:
+            self.dilation *= stride
+            stride = 1
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            if stride == 1:
+                downsample = nn.Sequential(
+                    _resnet_conv1x1(self.inplanes, planes * block.expansion),
+                    norm_layer(planes * block.expansion),
+                )
+                init_layer(downsample[0])
+                init_bn(downsample[1])
+            elif stride == 2:
+                downsample = nn.Sequential(
+                    nn.AvgPool2d(kernel_size=2), 
+                    _resnet_conv1x1(self.inplanes, planes * block.expansion),
+                    norm_layer(planes * block.expansion),
+                )
+                init_layer(downsample[1])
+                init_bn(downsample[2])
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
+                            self.base_width, previous_dilation, norm_layer))
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes, groups=self.groups,
+                                base_width=self.base_width, dilation=self.dilation,
+                                norm_layer=norm_layer))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        return x
+    
+class ResNet38(nn.Module):
+    def __init__(self):
+        
+        super(ResNet38, self).__init__()
+
+        self.conv_block1 = ConvBlock(in_channels=1, out_channels=64)
+        # self.conv_block2 = ConvBlock(in_channels=64, out_channels=64)
+
+        self.resnet = _ResNet(block=_ResnetBasicBlock, layers=[3, 4, 6, 3], zero_init_residual=True)
+
+        self.conv_block_after1 = ConvBlock(in_channels=512, out_channels=2048)
+
+        self.fc1 = nn.Linear(2048, 2048)
+
+        init_layer(self.fc1)
+
+    def forward(self, x):
+        x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training, inplace=True)
+        x = self.resnet(x)
+        x = F.avg_pool2d(x, kernel_size=(2, 2))
+        x = F.dropout(x, p=0.2, training=self.training, inplace=True)
+        x = self.conv_block_after1(x, pool_size=(1, 1), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training, inplace=True)
+        x = torch.mean(x, dim=3)
+        
+        (x1, _) = torch.max(x, dim=2)
+        x2 = torch.mean(x, dim=2)
+        x = x1 + x2
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = F.relu_(self.fc1(x))
+        embedding = F.dropout(x, p=0.5, training=self.training)
+
+        return embedding
+
+class gru_lstm_transformer_transfer_ResNet38(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.relu = nn.ReLU()
+
+        self.gru = nn.GRU(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.gru_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+        
+        self.lstm = nn.LSTM(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.lstm_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.1,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+        self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
+    
+        self.resnet38 = ResNet38()
+        checkpoint = torch.load('pth/ResNet38.pth', map_location='cuda')     # 모델을 동적으로 GPU에 할당
+        self.resnet38.load_state_dict(checkpoint['model'], strict=False)         # 더 많은 키를 갖고 있는 경우 strict=False
+        
+        
+        self.fc_linear1 = nn.Linear(4136, 1024)
+        self.fc_linear2 = nn.Linear(1024, 512)
+        self.fc_linear3 = nn.Linear(512, 256) 
+        self.fc_linear4 = nn.Linear(256, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+    
+    def forward(self, x):
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)
+        
+        
+        gru_embedding, h = self.gru(x_reduced)
+        gru_embedding = torch.mean(gru_embedding, dim=1)
+        gru_embedding = self.gru_ln(gru_embedding)
+        gru_embedding = self.relu(gru_embedding)
+        
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        lstm_embedding = self.lstm_ln(lstm_embedding)
+        lstm_embedding = self.relu(lstm_embedding)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        transformer_embedding = self.transformer_ln(transformer_embedding)
+        transformer_embedding = self.relu(transformer_embedding)
+        
+        resnet38_embedding = self.resnet38(x)
+        
+        complete_embedding = torch.cat([resnet38_embedding, gru_embedding, lstm_embedding, transformer_embedding], dim=1)
+        
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
     
