@@ -8,6 +8,7 @@
         - training acc만 빠르게 올라가고, val acc는 예전과 똑같이 올라감.
 """
 
+from email.policy import strict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -2376,4 +2377,341 @@ class gru_lstm_transformer_transfer_ResNet38(nn.Module):
         output_softmax = self.softmax_out(output_logits)
         
         return output_logits, output_softmax
+
+
+class _ResnetBottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
+                 base_width=64, dilation=1, norm_layer=None):
+        super(_ResnetBottleneck, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.)) * groups
+        self.stride = stride
+        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = _resnet_conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = _resnet_conv3x3(width, width)
+        self.bn2 = norm_layer(width)
+        self.conv3 = _resnet_conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+        self.init_weights()
+
+    def init_weights(self):
+        init_layer(self.conv1)
+        init_bn(self.bn1)
+        init_layer(self.conv2)
+        init_bn(self.bn2)
+        init_layer(self.conv3)
+        init_bn(self.bn3)
+        nn.init.constant_(self.bn3.weight, 0)
+
+    def forward(self, x):
+        identity = x
+
+        if self.stride == 2:
+            x = F.avg_pool2d(x, kernel_size=(2, 2))
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+        out = F.dropout(out, p=0.1, training=self.training)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(identity)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+class ResNet54(nn.Module):
+    def __init__(self):
+        
+        super(ResNet54, self).__init__()
+
+        self.conv_block1 = ConvBlock(in_channels=1, out_channels=64)
+        # self.conv_block2 = ConvBlock(in_channels=64, out_channels=64)
+
+        self.resnet = _ResNet(block=_ResnetBottleneck, layers=[3, 4, 6, 3], zero_init_residual=True)
+
+        self.conv_block_after1 = ConvBlock(in_channels=2048, out_channels=2048)
+
+        self.fc1 = nn.Linear(2048, 2048)
+
+        init_layer(self.fc1)
+
+    def forward(self, x):
+        x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training, inplace=True)
+        x = self.resnet(x)
+        x = F.avg_pool2d(x, kernel_size=(2, 2))
+        x = F.dropout(x, p=0.2, training=self.training, inplace=True)
+        x = self.conv_block_after1(x, pool_size=(1, 1), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training, inplace=True)
+        x = torch.mean(x, dim=3)
+        
+        (x1, _) = torch.max(x, dim=2)
+        x2 = torch.mean(x, dim=2)
+        x = x1 + x2
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = F.relu_(self.fc1(x))
+        embedding = F.dropout(x, p=0.5, training=self.training)
+        
+        return embedding
     
+class gru_lstm_transformer_transfer_ResNet54(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.relu = nn.ReLU()
+
+        self.gru = nn.GRU(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.gru_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+        
+        self.lstm = nn.LSTM(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.lstm_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.1,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+        self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
+    
+        self.resnet54 = ResNet54()
+        checkpoint = torch.load('pth/ResNet54.pth', map_location='cuda')     # 모델을 동적으로 GPU에 할당
+        self.resnet54.load_state_dict(checkpoint['model'], strict=False)         # 더 많은 키를 갖고 있는 경우 strict=False
+        
+        
+        self.fc_linear1 = nn.Linear(4136, 1024)
+        self.fc_linear2 = nn.Linear(1024, 512)
+        self.fc_linear3 = nn.Linear(512, 256) 
+        self.fc_linear4 = nn.Linear(256, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+    
+    def forward(self, x):
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)
+        
+        
+        gru_embedding, h = self.gru(x_reduced)
+        gru_embedding = torch.mean(gru_embedding, dim=1)
+        gru_embedding = self.gru_ln(gru_embedding)
+        gru_embedding = self.relu(gru_embedding)
+        
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        lstm_embedding = self.lstm_ln(lstm_embedding)
+        lstm_embedding = self.relu(lstm_embedding)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        transformer_embedding = self.transformer_ln(transformer_embedding)
+        transformer_embedding = self.relu(transformer_embedding)
+        
+        resnet54_embedding = self.resnet54(x)
+        
+        complete_embedding = torch.cat([resnet54_embedding, gru_embedding, lstm_embedding, transformer_embedding], dim=1)
+        
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
+    
+
+from torchvision.models import AlexNet
+class gru_lstm_transformer_transfer_AlexNet(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.transform = transforms.Resize([224,224])
+        self.resnet_patch_size = 40
+        self.resnet_num_patches = 7
+        
+        checkpoint = 'https://download.pytorch.org/models/alexnet-owt-7be5be79.pth'
+        
+        self.model_ft1 = AlexNet()
+        self.model_ft1.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+        self.model_ft1 = torch.nn.Sequential(*(list(self.model_ft1.children())[:-1]))
+        self.model_ft1 = nn.Sequential(
+            *(list(self.model_ft1.children())[:-1]),
+            nn.Dropout(0.4)           
+        )
+        
+        self.model_ft2 = AlexNet()
+        self.model_ft2.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+        self.model_ft2 = torch.nn.Sequential(*(list(self.model_ft2.children())[:-1]))
+        self.model_ft2 = nn.Sequential(
+            *(list(self.model_ft2.children())[:-1]),
+            nn.Dropout(0.4)           
+        )
+        
+        self.model_ft3 = AlexNet()
+        self.model_ft3.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+        self.model_ft3 = torch.nn.Sequential(*(list(self.model_ft3.children())[:-1]))
+        self.model_ft3 = nn.Sequential(
+            *(list(self.model_ft3.children())[:-1]),
+            nn.Dropout(0.4)           
+        )
+        
+        self.model_ft4 = AlexNet()
+        self.model_ft4.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+        self.model_ft4 = torch.nn.Sequential(*(list(self.model_ft4.children())[:-1]))
+        self.model_ft4 = nn.Sequential(
+            *(list(self.model_ft4.children())[:-1]),
+            nn.Dropout(0.4)           
+        )
+
+        self.model_ft5 = AlexNet()
+        self.model_ft5.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+        self.model_ft5 = torch.nn.Sequential(*(list(self.model_ft5.children())[:-1]))
+        self.model_ft5 = nn.Sequential(
+            *(list(self.model_ft5.children())[:-1]),
+            nn.Dropout(0.4)           
+        )
+        
+        self.model_ft6 = AlexNet()
+        self.model_ft6.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+        self.model_ft6 = torch.nn.Sequential(*(list(self.model_ft6.children())[:-1]))
+        self.model_ft6 = nn.Sequential(
+            *(list(self.model_ft6.children())[:-1]),
+            nn.Dropout(0.4)           
+        )
+        
+        self.model_ft7 = AlexNet()
+        self.model_ft7.load_state_dict(torch.hub.load_state_dict_from_url(checkpoint, progress=False), strict=False)
+        self.model_ft7 = torch.nn.Sequential(*(list(self.model_ft7.children())[:-1]))
+        self.model_ft7 = nn.Sequential(
+            *(list(self.model_ft7.children())[:-1]),
+            nn.Dropout(0.4)           
+        )
+        
+        self.maxpool = nn.MaxPool2d(kernel_size=[1, 4], stride=[1, 4])
+
+        self.relu = nn.ReLU()
+
+        self.gru = nn.GRU(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.gru_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+        
+        self.lstm = nn.LSTM(input_size=40, hidden_size=512, num_layers=4, batch_first=True, bidirectional=True, dropout=0.2)
+        self.lstm_ln = nn.LayerNorm(normalized_shape=1024, eps=1e-08)
+
+        transformer_layer = nn.TransformerEncoderLayer(
+            # input feature (frequency) dim after maxpooling 40*282 -> 40*70 (MFC*time)
+            d_model=40,
+            nhead=4,  # 4 self-attention layers in each multi-head self-attention layer in each encoder block
+            # 2 linear layers in each encoder block's feedforward network: dim 40-->512--->40
+            dim_feedforward=512,
+            dropout=0.1,
+            activation='relu'  # ReLU: avoid saturation/tame gradient/reduce compute time
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            transformer_layer, num_layers=4)
+        self.transformer_ln = nn.LayerNorm(normalized_shape=40, eps=1e-08)
+        
+        self.fc_linear1 = nn.Linear(65576, 1024)
+        self.fc_linear2 = nn.Linear(1024, 512)
+        self.fc_linear3 = nn.Linear(512, 256) 
+        self.fc_linear4 = nn.Linear(256, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+        
+    
+    def forward(self, x):
+        ft_input = rearrange(x, 'b c t f -> b t f c')   # (256, 7, 284, 1)
+        ft_input = ft_input[:,:,:280,:]     # (256, 7, 280, 1)
+        ft_input = rearrange(ft_input, 'b t (p p_f) c -> b p_f c t p', p=self.resnet_patch_size)     # (256, 7, 1, 40, 40)
+        resize_ft_input = self.resize(ft_input)     # (256, 7, 1, 224, 224)
+        resize_ft_input = torch.cat([resize_ft_input, resize_ft_input, resize_ft_input], dim=2)
+        
+        ft_output1 = self.model_ft1(resize_ft_input[:,0,:,:,:])
+        ft_output1 = torch.flatten(ft_output1, start_dim=1)
+        ft_output2 = self.model_ft2(resize_ft_input[:,1,:,:,:])
+        ft_output2 = torch.flatten(ft_output2, start_dim=1)
+        ft_output3 = self.model_ft3(resize_ft_input[:,2,:,:,:])
+        ft_output3 = torch.flatten(ft_output3, start_dim=1)
+        ft_output4 = self.model_ft4(resize_ft_input[:,3,:,:,:])
+        ft_output4 = torch.flatten(ft_output4, start_dim=1)
+        ft_output5 = self.model_ft5(resize_ft_input[:,4,:,:,:])
+        ft_output5 = torch.flatten(ft_output5, start_dim=1)
+        ft_output6 = self.model_ft6(resize_ft_input[:,5,:,:,:])
+        ft_output6 = torch.flatten(ft_output6, start_dim=1)
+        ft_output7 = self.model_ft7(resize_ft_input[:,6,:,:,:])
+        ft_output7 = torch.flatten(ft_output7, start_dim=1)
+        
+        ft_embedding = torch.cat([ft_output1, ft_output2, ft_output3, ft_output4, ft_output5, ft_output6, ft_output7], dim=1)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(0, 2, 1)
+        
+        
+        gru_embedding, h = self.gru(x_reduced)
+        gru_embedding = torch.mean(gru_embedding, dim=1)
+        gru_embedding = self.gru_ln(gru_embedding)
+        gru_embedding = self.relu(gru_embedding)
+        
+
+        lstm_embedding, (h, c) = self.lstm(x_reduced)
+        lstm_embedding = torch.mean(lstm_embedding, dim=1)
+        lstm_embedding = self.lstm_ln(lstm_embedding)
+        lstm_embedding = self.relu(lstm_embedding)
+        
+        x_reduced = self.maxpool(x)
+        x_reduced = torch.squeeze(x_reduced, 1)
+        x_reduced = x_reduced.permute(2, 0, 1)
+
+        transformer_output = self.transformer_encoder(x_reduced)
+        transformer_embedding = torch.mean(transformer_output, dim=0)
+        transformer_embedding = self.transformer_ln(transformer_embedding)
+        transformer_embedding = self.relu(transformer_embedding)
+        
+        complete_embedding = torch.cat([ft_embedding, gru_embedding, transformer_embedding], dim=1)
+        # print(complete_embedding.shape)
+        
+        logits = self.fc_linear1(complete_embedding)
+        logits = self.fc_linear2(logits)
+        logits = self.fc_linear3(logits)
+        output_logits = self.fc_linear4(logits)
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
+    
+    def resize(self, ft_input):
+        ret = torch.zeros((ft_input.shape[0], self.resnet_num_patches, 1, 224, 224)).cuda()
+        
+        for i in range(self.resnet_num_patches):
+            ret[:,i,:,:,:] = self.transform(ft_input[:,i,:,:,:])
+        
+        return ret
