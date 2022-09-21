@@ -6,7 +6,9 @@ import torch.nn as nn
 import torch
 import os
 import yaml
-from model import gru_lstm_transformer_ln
+from sklearn.model_selection import StratifiedKFold
+from tqdm.auto import tqdm
+from model import gru_lstm_transformer_transfer_AlexNet
 
 os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
@@ -40,7 +42,7 @@ emotion_attributes = {
     '02': 'strong'
 }
 
-model = gru_lstm_transformer_ln(num_emotions=len(emotions_dict)).to(cfg['device'])
+model = gru_lstm_transformer_transfer_AlexNet(num_emotions=len(emotions_dict)).to(cfg['device'])
 
 
 def preprocess_and_save():
@@ -67,9 +69,8 @@ def preprocess_and_save():
     for emotion_num in range(len(emotions_dict)):
 
         # find all indices of a single unique emotion
-        emotion_indices = [index for index, emotion in enumerate(
-            emotions) if emotion == emotion_num]
-
+        emotion_indices = [index for index, emotion in enumerate(emotions) if emotion == emotion_num]
+        
         # seed for reproducibility
         np.random.seed(69)
         # shuffle indicies
@@ -139,16 +140,14 @@ def preprocess_and_save():
 
     # initialize w arrays
     # We extract MFCC features from waveforms and store in respective 'features' array
-    features_train, features_valid, features_test = [], [], []
-
     print('Train waveforms:')  # get training set features
-    features_train = get_features(X_train, features_train, cfg['sample_rate'])
+    features_train = get_features(X_train, cfg['sample_rate'])
 
     print('\n\nValidation waveforms:')  # get validation set features
-    features_valid = get_features(X_valid, features_valid, cfg['sample_rate'])
+    features_valid = get_features(X_valid, cfg['sample_rate'])
 
     print('\n\nTest waveforms:')  # get test set features
-    features_test = get_features(X_test, features_test, cfg['sample_rate'])
+    features_test = get_features(X_test, cfg['sample_rate'])
 
     print(f'\n\nFeatures set: {len(features_train)+len(features_test)+len(features_valid)} total, {len(features_train)} train, {len(features_valid)} validation, {len(features_test)} test samples')
     print(
@@ -215,6 +214,101 @@ def preprocess_and_save():
 
     print('[*] Features and labels saved.')
 
+def kfold(splits=5):
+    # load data
+    # init explicitly to prevent data leakage from past sessions, since load_data() appends
+    waveforms, emotions = [], []
+    waveforms, emotions, _, _ = load_data(cfg['dataset'], emotion_attributes)
+
+    print(f'Waveforms set: {len(waveforms)} samples')
+    # we have 1440 waveforms but we need to know their length too; should be 3 sec * 48k = 144k
+    print(f'Waveform signal length: {len(waveforms[0])}')
+    print(f'Emotions set: {len(emotions)} sample labels')
+
+    # convert waveforms to array for processing
+    waveforms = np.array(waveforms)
+    emotions = np.array(emotions)
+
+    skf = StratifiedKFold(n_splits=splits, random_state=2022, shuffle=True)
+
+    X_train, y_train = [], []
+    X_test, y_test = [], []
+    test_set = []
+    for train_idx, test_idx in skf.split(waveforms, emotions):
+        X_train.append(waveforms[train_idx])
+        y_train.append(np.array(emotions[train_idx], dtype=np.int32))
+        X_test.append(waveforms[test_idx])
+        y_test.append(np.array(emotions[test_idx], dtype=np.int32))
+
+        test_set.append(test_idx)
+
+    # test_set = np.concatenate(test_set, axis=0)
+
+    _, count = np.unique(np.concatenate([test_set], axis=0), return_counts=True)
+
+    # if each index appears just once, and we have 1440 such unique indices, then all sets are unique
+    assert sum(count == 1) == len(emotions),f'\nSets are unique: {sum(count==1)} samples out of {len(emotions)} are unique'
+
+    return X_train, y_train, X_test, y_test, splits
+    
+def kfold_preprocess_and_save():
+    X_train, y_train, X_test, y_test, splits = kfold()
+    
+    # check shape of each set
+    print(f'Training waveforms:{X_train[0].shape}, y_train:{y_train[0].shape}')
+    print(f'Test waveforms:{X_test[0].shape}, y_test:{y_test[0].shape}')
+    
+    features_train, features_test = [], []
+    # initialize w arrays
+    # Extract MFCC features from waveforms and store in respective 'features' array
+    for i in tqdm(range(splits), desc='get features..........'):
+        train = get_features(X_train[i], cfg['sample_rate'])
+        test = get_features(X_test[i], cfg['sample_rate'])
+
+        features_train.append(train)
+        features_test.append(test)
+    
+    multiples = 2
+    # augment waveforms of dataset
+    for i in tqdm(range(splits), desc='augment awgn waveforms..........'):
+        features_train[i], y_train[i] = augment_awgn_waveforms(
+            X_train[i], features_train[i], y_train[i], multiples, cfg['sample_rate'])
+        features_test[i], y_test[i] = augment_awgn_waveforms(
+            X_test[i], features_test[i], y_test[i], multiples, cfg['sample_rate'])
+    
+    # Check new shape of extracted features and data:
+    print(f'\n\nNative + Augmented Features set: {len(features_train[0])+len(features_test[0])} total, {len(features_train[0])} train, {len(features_test[0])} test samples')
+    print(f'{len(y_train[0])} training sample labels, {len(y_test[0])} test sample labels')
+    print(f'Features (MFCC matrix) shape: {len(features_train[0][0])} mel frequency coefficients x {len(features_train[0][0][1])} time steps')
+
+    print(f'train shape: {np.array(features_train[0]).shape}')
+    
+    for i in range(splits):
+        # need to make dummy input channel for CNN input feature tensor
+        X_train[i] = np.expand_dims(features_train[i], 1)
+        X_test[i] = np.expand_dims(features_test[i], 1)
+
+        # convert emotion labels from list back to numpy arrays for PyTorch to work with
+        y_train[i] = np.array(y_train[i])
+        y_test[i] = np.array(y_test[i])
+        
+    print(f'Shape of 4D feature array for input tensor: {X_train[0].shape} train, {X_test[0].shape} test')
+    print(f'Shape of emotion labels: {y_train[0].shape} train, {y_test[0].shape} test')
+    
+    for i in tqdm(range(splits), desc='feature scaling..........'):
+        X_train[i], X_test[i], y_train[i], y_test[i] = feature_scaling(X_train[i], X_test[i], y_train[i], y_test[i])
+
+    # check shape of each set again
+    print(f'X_train scaled:{X_train[0].shape}, y_train:{y_train[0].shape}')
+    print(f'X_test scaled:{X_test[0].shape}, y_test:{y_test[0].shape}')
+    
+    # open file in write mode and write data
+    with open(cfg['kfold_npy_name'], 'wb') as f:
+        np.save(f, X_train)
+        np.save(f, X_test)
+        np.save(f, y_train)
+        np.save(f, y_test)
+
 
 def criterion(predictions, targets):
     return nn.CrossEntropyLoss()(input=predictions, target=targets)
@@ -256,7 +350,7 @@ def make_validate_fnc(model, criterion):
 
             # set model to validation phase i.e. turn off dropout and batchnorm layers
             model.eval()
-
+            
             # get the model's predictions on the validation set
             output_logits, output_softmax = model(X)
             predictions = torch.argmax(output_softmax, dim=1)
@@ -485,8 +579,7 @@ def train(optimizer, model, num_epochs, X_train, Y_train, X_valid, Y_valid):
 
         # create tensors from validation set
         X_valid_tensor = torch.tensor(X_valid, device=cfg['device']).float()
-        Y_valid_tensor = torch.tensor(
-            Y_valid, dtype=torch.long, device=cfg['device'])
+        Y_valid_tensor = torch.tensor(Y_valid, dtype=torch.long, device=cfg['device'])
 
         # calculate validation metrics to keep track of progress; don't need predictions now
         valid_loss, valid_acc, _ = validate(X_valid_tensor, Y_valid_tensor)
@@ -540,10 +633,11 @@ def main():
     # print(model)
     summary(model, input_size=(cfg['minibatch'], 1,40,282))
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-3, momentum=0.8)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-3, momentum=0.8)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-08, weight_decay=0., amsgrad=True)
 
-    # train_earlystop(optimizer, model, cfg['num_epochs'], X_train, y_train, X_valid, y_valid)
-    train(optimizer, model, cfg['num_epochs'], X_train, y_train, X_valid, y_valid)
+    train_earlystop(optimizer, model, cfg['num_epochs'], X_train, y_train, X_valid, y_valid)
+    # train(optimizer, model, cfg['num_epochs'], X_train, y_train, X_valid, y_valid)
 
     load_checkpoint(optimizer, model, pkl_name)
 
@@ -563,4 +657,5 @@ def main():
 
 if __name__ == '__main__':
     # preprocess_and_save()
+    kfold_preprocess_and_save()
     main()

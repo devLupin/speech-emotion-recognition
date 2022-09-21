@@ -61,8 +61,9 @@ def feature_mfcc(
 
     return mfc_coefficients
 
-def get_features(waveforms, features, sample_rate=48000):
-
+def get_features(waveforms, sample_rate=48000):
+    features = []
+    
     # initialize counter to track progress
     file_count = 0
 
@@ -163,3 +164,24 @@ def feature_scaling(X_train, X_valid, X_test, y_train, y_valid, y_test):
     X_test = np.reshape(X_test, (N,C,H,W))
 
     return X_train, X_valid, X_test, y_train, y_valid, y_test
+
+def feature_scaling(X_train, X_test, y_train, y_test):
+    scaler = StandardScaler()
+
+    #### Scale the training data ####
+    # store shape so we can transform it back 
+    N,C,H,W = X_train.shape
+    # Reshape to 1D because StandardScaler operates on a 1D array
+    # tell numpy to infer shape of 1D array with '-1' argument
+    X_train = np.reshape(X_train, (N,-1)) 
+    X_train = scaler.fit_transform(X_train)
+    # Transform back to NxCxHxW 4D tensor format
+    X_train = np.reshape(X_train, (N,C,H,W))
+
+    #### Scale the test set ####
+    N,C,H,W = X_test.shape
+    X_test = np.reshape(X_test, (N,-1))
+    X_test = scaler.transform(X_test)
+    X_test = np.reshape(X_test, (N,C,H,W))
+
+    return X_train, X_test, y_train, y_test
