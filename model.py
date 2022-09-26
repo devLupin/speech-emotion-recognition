@@ -2923,3 +2923,71 @@ class transfer_vgg11_bn(nn.Module):
             ret[:,i,:,:,:] = self.transform(ft_input[:,i,:,:,:])
         
         return ret
+    
+
+class transfer_densenet121(nn.Module):
+    def __init__(self, num_emotions) -> None:
+        super().__init__()
+        
+        self.transform = transforms.Resize([224,224])
+        self.resnet_patch_size = 40
+        self.resnet_num_patches = 7
+        
+        self.model_ft1 = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
+        self.model_ft1 = torch.nn.Sequential(*(list(self.model_ft1.children())[:-1]))
+        self.model_ft2 = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
+        self.model_ft2 = torch.nn.Sequential(*(list(self.model_ft2.children())[:-1]))
+        self.model_ft3 = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
+        self.model_ft3 = torch.nn.Sequential(*(list(self.model_ft3.children())[:-1]))
+        self.model_ft4 = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
+        self.model_ft4 = torch.nn.Sequential(*(list(self.model_ft4.children())[:-1]))
+        self.model_ft5 = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
+        self.model_ft5 = torch.nn.Sequential(*(list(self.model_ft5.children())[:-1]))
+        self.model_ft6 = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
+        self.model_ft6 = torch.nn.Sequential(*(list(self.model_ft6.children())[:-1]))
+        self.model_ft7 = torch.hub.load('pytorch/vision:v0.10.0', 'densenet121', pretrained=True)
+        self.model_ft7 = torch.nn.Sequential(*(list(self.model_ft7.children())[:-1]))
+        
+        self.fc_linear = nn.Linear(175616, num_emotions)
+        self.softmax_out = nn.Softmax(dim=1)
+        
+        
+    
+    def forward(self, x):
+        ft_input = rearrange(x, 'b c t f -> b t f c')   # (256, 7, 284, 1)
+        ft_input = ft_input[:,:,:280,:]     # (256, 7, 280, 1)
+        ft_input = rearrange(ft_input, 'b t (p p_f) c -> b p_f c t p', p=self.resnet_patch_size)     # (256, 7, 1, 40, 40)
+        resize_ft_input = self.resize(ft_input)     # (256, 7, 1, 224, 224)
+        resize_ft_input = torch.cat([resize_ft_input, resize_ft_input, resize_ft_input], dim=2)
+        
+        ft_output1 = self.model_ft1(resize_ft_input[:,0,:,:,:])
+        ft_output1 = torch.flatten(ft_output1, start_dim=1)
+        ft_output2 = self.model_ft2(resize_ft_input[:,1,:,:,:])
+        ft_output2 = torch.flatten(ft_output2, start_dim=1)
+        ft_output3 = self.model_ft3(resize_ft_input[:,2,:,:,:])
+        ft_output3 = torch.flatten(ft_output3, start_dim=1)
+        ft_output4 = self.model_ft4(resize_ft_input[:,3,:,:,:])
+        ft_output4 = torch.flatten(ft_output4, start_dim=1)
+        ft_output5 = self.model_ft5(resize_ft_input[:,4,:,:,:])
+        ft_output5 = torch.flatten(ft_output5, start_dim=1)
+        ft_output6 = self.model_ft6(resize_ft_input[:,5,:,:,:])
+        ft_output6 = torch.flatten(ft_output6, start_dim=1)
+        ft_output7 = self.model_ft7(resize_ft_input[:,6,:,:,:])
+        ft_output7 = torch.flatten(ft_output7, start_dim=1)
+        
+        ft_embedding = torch.cat([ft_output1, ft_output2, ft_output3, ft_output4, ft_output5, ft_output6, ft_output7], dim=1)
+        print(ft_embedding.shape)
+        
+        output_logits = self.fc_linear(ft_embedding)
+        output_softmax = self.softmax_out(output_logits)
+        
+        return output_logits, output_softmax
+    
+    def resize(self, ft_input):
+        ret = torch.zeros((ft_input.shape[0], self.resnet_num_patches, 1, 224, 224)).cuda()
+        
+        for i in range(self.resnet_num_patches):
+            ret[:,i,:,:,:] = self.transform(ft_input[:,i,:,:,:])
+        
+        return ret
+    
