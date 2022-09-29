@@ -1,6 +1,6 @@
 dataset/
 model/
-*.ipynb
+# *.ipynb
 .vscode/
 *.json
 .DS_Store

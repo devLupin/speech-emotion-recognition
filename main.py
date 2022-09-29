@@ -8,7 +8,7 @@ import os
 import yaml
 from sklearn.model_selection import StratifiedKFold
 from tqdm.auto import tqdm
-from model import gru_lstm_transformer_transfer_AlexNet
+from model import transfer_densenet121
 
 os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
 
@@ -42,7 +42,7 @@ emotion_attributes = {
     '02': 'strong'
 }
 
-model = gru_lstm_transformer_transfer_AlexNet(num_emotions=len(emotions_dict)).to(cfg['device'])
+model = transfer_densenet121(num_emotions=len(emotions_dict)).to(cfg['device'])
 
 
 def preprocess_and_save():
@@ -250,6 +250,18 @@ def kfold(splits=5):
     assert sum(count == 1) == len(emotions),f'\nSets are unique: {sum(count==1)} samples out of {len(emotions)} are unique'
 
     return X_train, y_train, X_test, y_test, splits
+
+def paper_fold(fold):
+    actors_per_fold = {
+        0: [2,5,14,15,16],
+        1: [3, 6, 7, 13, 18],
+        2: [10, 11, 12, 19, 20],
+        3: [8, 17, 21, 23, 24],
+        4: [1, 4, 9, 22],
+    }
+    
+    test = actors_per_fold[0]
+    
     
 def kfold_preprocess_and_save():
     X_train, y_train, X_test, y_test, splits = kfold()
@@ -657,5 +669,5 @@ def main():
 
 if __name__ == '__main__':
     # preprocess_and_save()
-    kfold_preprocess_and_save()
+    # kfold_preprocess_and_save()
     main()
