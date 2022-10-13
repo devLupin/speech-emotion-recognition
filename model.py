@@ -2858,7 +2858,6 @@ class gru_lstm_transformer_transfer_AlexNet(nn.Module):
         
         return ret
     
-
 class transfer_vgg11_bn(nn.Module):
     def __init__(self, num_emotions) -> None:
         super().__init__()
@@ -2923,7 +2922,6 @@ class transfer_vgg11_bn(nn.Module):
             ret[:,i,:,:,:] = self.transform(ft_input[:,i,:,:,:])
         
         return ret
-    
 
 class transfer_densenet121(nn.Module):
     def __init__(self, num_emotions) -> None:
