@@ -1,0 +1,12 @@
+sub_name: 'gru_lstm_transformer_transfer_ResNet54'
+
+data_name: 'RAVDESS'
+dataset: 'dataset/Actor_*/*.wav'
+npy_name: 'features+labels.npy'
+kfold_npy_name: 'k-fold.npy'
+
+sample_rate: 48000
+minibatch: 32  # pick minibatch size (of 32... always)
+num_epochs: 500
+
+device: 'cuda'
