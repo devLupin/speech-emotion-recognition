@@ -6,7 +6,7 @@
 - 성과
   - well-known speech emotion recognition dataset에서 최신 성능 달성
   - 스마트미디어저널 6월 게재 예정
-- 성능
+- 성능 (ACC / Number of parameters)
   - EMODB : 87.86% / 156,384
   - RAVDESS : 83.44% / 156,449
   - IEMOCAP : 66,06 / 156,189
