@@ -1,7 +1,7 @@
 # speech-emotion-recognition
 <hr>
 
-### [RoutingConvNet: 양방향 MFCC 기반 경량 음성감정인식 모델](https://drive.google.com/file/d/1WCNfg-1Wwk5Yd-0_qFxTxA0DXyoRBXEJ/view?usp=sharing)
+### [RoutingConvNet: 양방향 MFCC 기반 경량 음성감정인식 모델](https://drive.google.com/file/d/1DBfajnCAWIlKifMxQDGri0Mz3LAZ7pV9/view)
 - 기간 : 2022.08 ~ 2023.02
 - 성과
   - well-known speech emotion recognition dataset에서 최신 성능 달성
