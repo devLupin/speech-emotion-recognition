@@ -11,3 +11,6 @@
   - EMODB : 87.86% / 156,384
   - RAVDESS : 83.44% / 156,449
   - IEMOCAP : 66,06 / 156,189
+
+### License
+- Non-commercial only
